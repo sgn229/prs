@@ -27,6 +27,10 @@ A powerful, lightweight proxy server designed to handle HLS, M3U8, and DASH (MPD
 The **Full** version includes the proxy plus FlareSolverr and Byparr for maximum compatibility.
 
 ```bash
+# Light Version (Proxy Only - Default)
+docker run -d -p 7860:7860 --name EasyProxy ghcr.io/realbestia1/easyproxy:latest
+
+# Full Version (Proxy + Solvers)
 docker run -d -p 7860:7860 --name EasyProxy ghcr.io/realbestia1/easyproxy:full
 ```
 
@@ -53,9 +57,10 @@ python app.py
 
 | Method | Description |
 | :--- | :--- |
+| **Light (Default)** | Standard `docker build .` uses the base `Dockerfile`. |
+| **Full** | Use `Dockerfile.full` for a monolithic build with solvers included. |
 | **Docker Compose** | Run the complete stack (Proxy + Solvers) with `docker-compose up -d`. |
 | **HuggingFace** | Use `Dockerfile-hf` for seamless deployment on HF Spaces. |
-| **Render/Koyeb** | Deploy using the provided `Dockerfile` or start commands (see docs). |
 | **Termux** | Support for Android via Python & FFmpeg. |
 
 ---
