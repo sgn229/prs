@@ -51,6 +51,10 @@ if [ "$ENABLE_WARP" = "true" ]; then
         (warp-cli --accept-tos tunnel host add cccdn.net > /dev/null 2>&1 || \
          warp-cli --accept-tos add-excluded-domain cccdn.net > /dev/null 2>&1) || true
         
+        # Set mode to proxy (SOCKS5) and force port 1080
+        warp-cli --accept-tos mode proxy
+        warp-cli --accept-tos proxy set-port 1080
+        
         warp-cli --accept-tos connect
         
         # Small delay for connection to stabilize
@@ -61,10 +65,16 @@ fi
 
 # Start FlareSolverr in the background
 echo "🚀 Starting FlareSolverr (v3 Python)..."
+if [ "$ENABLE_WARP" = "true" ]; then
+    export PROXY="socks5://127.0.0.1:1080"
+fi
 cd /app/flaresolverr && PORT=8191 python3 src/flaresolverr.py &
 
 # Start Byparr in the background
 echo "🛡️ Starting Byparr..."
+if [ "$ENABLE_WARP" = "true" ]; then
+    export GLOBAL_PROXY="socks5://127.0.0.1:1080"
+fi
 cd /app/byparr_src && PORT=8192 python3 main.py &
 
 # Start EasyProxy (Gunicorn)
