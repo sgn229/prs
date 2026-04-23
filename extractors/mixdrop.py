@@ -9,7 +9,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp_socks import ProxyConnector
 
-from config import FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT, get_proxy_for_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy
+from config import FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT, get_proxy_for_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy, get_solver_proxy_url
 from utils.packed import eval_solver
 from bs4 import BeautifulSoup
 
@@ -48,14 +48,16 @@ class MixdropExtractor:
             "cmd": cmd,
             "maxTimeout": (FLARESOLVERR_TIMEOUT + 60) * 1000,
         }
+        fs_headers = {}
         if url: 
             payload["url"] = url
             # Determina dinamicamente il proxy per questo specifico URL
             proxy = get_proxy_for_url(url, TRANSPORT_ROUTES, self.proxies)
             if proxy:
-                # FlareSolverr richiede il proxy nel formato {"url": "..."}
                 payload["proxy"] = {"url": proxy}
-                logger.debug(f"Mixdrop: Passing proxy to FlareSolverr: {proxy}")
+                solver_proxy = get_solver_proxy_url(proxy)
+                fs_headers["X-Proxy-Server"] = solver_proxy
+                logger.debug(f"Mixdrop: Passing explicit proxy to solver: {solver_proxy}")
 
         if post_data: payload["postData"] = post_data
         if session_id: payload["session"] = session_id
@@ -65,6 +67,7 @@ class MixdropExtractor:
                 async with fs_session.post(
                     endpoint,
                     json=payload,
+                    headers=fs_headers,
                     timeout=aiohttp.ClientTimeout(total=FLARESOLVERR_TIMEOUT + 95),
                 ) as resp:
                     if resp.status != 200:
