@@ -1,45 +1,39 @@
-name: 'Sync (at night)'
+name: Sync upstream
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # ogni giorno alle 02:00 UTC
+    - cron: '0 * * * *' # ogni ora
+  workflow_dispatch:
 
-  workflow_dispatch:  # esecuzione manuale
-    inputs:
-      sync_test_mode:
-        description: 'Fork Sync Test Mode'
-        type: boolean
-        default: false
+permissions:
+  contents: write
 
 jobs:
-  sync_latest_from_upstream:
+  sync:
     runs-on: ubuntu-latest
-    name: Sync latest commits from upstream repo
 
     steps:
-    # Step 1: checkout del repository
-    - name: Checkout target repo
-      uses: taiki-e/checkout-action@v1.4.1
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-    # Step 2: sincronizzazione con upstream
-    - name: Sync upstream changes
-      id: sync
-      uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.2
-      with:
-        target_sync_branch: main
-        target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-        upstream_sync_branch: main
-        upstream_sync_repo: realbestia1/EasyProxy
-        test_mode: ${{ inputs.sync_test_mode }}
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Add upstream
+        run: git remote add upstream https://github.com/stremio-manager/EasyProxy.git || true
 
-    # Step 3: messaggi di output
-    - name: New commits found
-      if: steps.sync.outputs.has_new_commits == 'true'
-      run: echo "New commits were found to sync."
+      - name: Fetch upstream
+        run: git fetch upstream
 
-    - name: No new commits
-      if: steps.sync.outputs.has_new_commits == 'false'
-      run: echo "There were no new commits."
-
-    - name: Show value of 'has_new_commits'
-      run: echo ${{ steps.sync.outputs.has_new_commits }}
+      - name: Sync with upstream
+        run: |
+          set -e
+          if git diff --quiet HEAD upstream/main; then
+            echo "Already aligned with upstream"
+            exit 0
+          fi
+          git merge -X theirs upstream/main --no-edit
+          git push origin main
