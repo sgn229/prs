@@ -73,7 +73,7 @@ fi
 
 PROXY_VARS=""
 if [ "$ENABLE_WARP" = "true" ]; then
-    PROXY_VARS="HTTP_PROXY=socks5://127.0.0.1:1080 HTTPS_PROXY=socks5://127.0.0.1:1080"
+    PROXY_VARS="HTTP_PROXY=socks5://127.0.0.1:1080 HTTPS_PROXY=socks5://127.0.0.1:1080 NO_PROXY=localhost,127.0.0.1"
     echo "FlareSolverr/Byparr will use WARP SOCKS5 proxy: socks5://127.0.0.1:1080"
 fi
 
