@@ -61,6 +61,39 @@ class VixSrcExtractor:
         headers.update(extra_headers)
         return headers
 
+    async def _make_curl_request(self, url: str, headers: dict = None):
+        """Fetch Cloudflare-protected embeds with curl_cffi instead of aiohttp/proxy."""
+        from curl_cffi.requests import AsyncSession as CurlAsyncSession
+
+        async with CurlAsyncSession(impersonate="chrome131") as session:
+            resp = await session.get(
+                url,
+                headers=headers,
+                timeout=30,
+                allow_redirects=True,
+            )
+            content = resp.text
+
+        logger.info("curl_cffi direct status=%s len=%s for %s", resp.status_code, len(content) if content else 0, url)
+
+        class MockResponse:
+            def __init__(self, text_content, status, response_url):
+                self._text = text_content
+                self.status = status
+                self.status_code = status
+                self.text = text_content
+                self.url = response_url
+                self.headers = {}
+
+            async def text_async(self):
+                return self._text
+
+            def raise_for_status(self):
+                if self.status >= 400:
+                    raise ExtractorError(f"curl_cffi HTTP error {self.status} for {self.url}")
+
+        return MockResponse(content, resp.status_code, url)
+
     @staticmethod
     def _normalize_base_site(url: str) -> str:
         parsed = urlparse(url)
@@ -437,12 +470,18 @@ class VixSrcExtractor:
 
             if "/embed/" in parsed_url.path:
                 self._raise_if_embed_expired(url)
-                response = await self._make_robust_request(
-                    url,
-                    headers=self._fresh_headers(
-                        referer=self._normalize_base_site(url) + "/"
-                    ),
-                )
+                if parsed_url.netloc.lower().endswith("vixcloud.co"):
+                    response = await self._make_curl_request(
+                        url,
+                        headers={"referer": self._normalize_base_site(url) + "/"},
+                    )
+                else:
+                    response = await self._make_robust_request(
+                        url,
+                        headers=self._fresh_headers(
+                            referer=self._normalize_base_site(url) + "/"
+                        ),
+                    )
             elif "iframe" in url:
                 site_url = url.split("/iframe")[0]
                 version = await self.version(site_url)
