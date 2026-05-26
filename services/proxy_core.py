@@ -109,6 +109,7 @@ class HLSProxyCoreMixin:
         headers: dict,
         ttl: int = 30,
         source_url: str = None,
+        start_refresh: bool = True,
     ) -> str:
         now = time.time()
         expired_keys = [
@@ -130,7 +131,7 @@ class HLSProxyCoreMixin:
         url_id = f"cm_{hashlib.md5(stable_key.encode()).hexdigest()[:12]}"
         self.captured_hls_manifest_map[url_id] = (url, manifest, headers, now, ttl, source_url)
         self.hls_url_map[url_id] = (url, now, ttl)
-        if source_url and (
+        if start_refresh and source_url and (
             url_id not in self.captured_hls_refresh_tasks
             or self.captured_hls_refresh_tasks[url_id].done()
         ):
