@@ -38,6 +38,7 @@ class VixSrcExtractor:
         self.flaresolverr_timeout = FLARESOLVERR_TIMEOUT
         self._fs_cookies = None
         self._fs_user_agent = None
+        self._fs_proxy = None
     @staticmethod
     def _normalize_proxy_url(proxy_value: str) -> str:
         proxy_value = proxy_value.strip()
@@ -67,7 +68,12 @@ class VixSrcExtractor:
         site = self._normalize_base_site(target_url)
         endpoint = f"{self.flaresolverr_url.rstrip('/')}/v1"
         warp = WARP_PROXY_URL.strip()
-        proxies_to_try = [warp.replace("socks5h://", "socks5://", 1)] if warp else [None]
+        proxies_to_try = []
+        if warp:
+            proxies_to_try.append(warp.replace("socks5h://", "socks5://", 1))
+        for proxy in self.proxies or []:
+            if proxy and proxy not in proxies_to_try:
+                proxies_to_try.append(proxy.replace("socks5h://", "socks5://", 1))
         if None not in proxies_to_try:
             proxies_to_try.append(None)
         for proxy in proxies_to_try:
@@ -82,6 +88,8 @@ class VixSrcExtractor:
                     self._fs_cookies = {c["name"]: c["value"] for c in d["solution"].get("cookies", [])}
                     self._fs_user_agent = d["solution"].get("userAgent",
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    self._fs_proxy = proxy
+                    self.last_used_proxy = proxy.replace("socks5://", "socks5h://", 1) if proxy else None
                     logger.info(f"VixSrc: FS cookies via {proxy or 'direct'}: {list(self._fs_cookies.keys())}")
                     return
                 logger.warning("FS failed via %s: %s", proxy or "direct", d.get("message", ""))
@@ -104,9 +112,9 @@ class VixSrcExtractor:
         final_headers.pop("accept-encoding", None)
 
         request_kwargs = {}
-        warp = WARP_PROXY_URL.strip()
-        if warp:
-            request_kwargs["proxies"] = {"http": warp, "https": warp}
+        if self._fs_proxy:
+            proxy_url = self._fs_proxy.replace("socks5://", "socks5h://", 1)
+            request_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
 
         async with CurlAsyncSession(impersonate="chrome124") as sess:
             r = await sess.get(url, headers=final_headers, timeout=30, allow_redirects=True, **request_kwargs)
@@ -361,33 +369,9 @@ class VixSrcExtractor:
 
                 if e.status == 403 and attempt == retries - 1:
                     try:
-                        from curl_cffi.requests import AsyncSession as CurlAsyncSession
-                        logger.info("aiohttp 403, trying curl_cffi for %s", url)
+                        logger.info("aiohttp 403, trying curl_cffi with configured proxies for %s", url)
                         headers_403 = final_headers or self._default_headers()
-                        async with CurlAsyncSession(impersonate="chrome131") as session:
-                            resp = await session.get(
-                                url,
-                                headers=headers_403,
-                                timeout=30,
-                                allow_redirects=True,
-                            )
-                            status_403 = resp.status_code
-                            text_403 = resp.text
-                        logger.info("curl_cffi fallback status=%s len=%s for %s", status_403, len(text_403) if text_403 else 0, url)
-                        if status_403 == 200 and text_403:
-                            class MockResponse:
-                                def __init__(self, text_content, status, response_url):
-                                    self._text = text_content
-                                    self.status = status
-                                    self.status_code = status
-                                    self.text = text_content
-                                    self.url = response_url
-                                    self.headers = {}
-                                async def text_async(self):
-                                    return self._text
-                                def raise_for_status(self):
-                                    pass
-                            return MockResponse(text_403, status_403, url)
+                        return await self._make_curl_request(url, headers=headers_403)
                     except Exception as cffi_exc:
                         logger.warning("curl_cffi fallback failed for %s: %s", url, cffi_exc)
 
