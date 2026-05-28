@@ -48,6 +48,14 @@ def parse_proxies(proxy_env_var: str) -> list:
     return []
 
 
+def get_extractor_proxies(extractor_name: str) -> list:
+    """Returns proxies from EXTRACTOR_PROXY env vars, e.g. VIXSRC_PROXY."""
+    if not extractor_name:
+        return []
+    env_name = f"{extractor_name.upper().replace('-', '_')}_PROXY"
+    return parse_proxies(env_name)
+
+
 def parse_transport_routes() -> list:
     """Analizza TRANSPORT_ROUTES nel formato {URL=domain, PROXY=proxy, DISABLE_SSL=true/false}."""
     routes_str = os.environ.get("TRANSPORT_ROUTES", "").strip()
