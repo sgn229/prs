@@ -153,6 +153,7 @@ def get_ordered_proxies_for_url(
         add(proxy)
 
     add(get_transport_route_proxy(url or "", TRANSPORT_ROUTES))
+    add(SELECTED_PROXY_CONTEXT.get())
 
     for proxy in fallback_proxies or []:
         add(proxy)

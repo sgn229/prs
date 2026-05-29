@@ -30,6 +30,7 @@ class VixSrcExtractor:
         self.request_headers = request_headers
         self.base_headers = self._default_headers()
         self.session = None
+        self.session_proxy = None
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self._session_lock = asyncio.Lock()
         self.proxies = []
@@ -403,15 +404,21 @@ class VixSrcExtractor:
 
     async def _get_session(self, url: str = None):
         """Ottiene una sessione HTTP persistente."""
+        proxy = None
+        if url:
+            proxy = get_preferred_proxy_for_url(url, self.extractor_name, self.proxies)
+        else:
+            proxy = self._get_random_proxy()
+        if proxy:
+            proxy = self._normalize_proxy_url(proxy)
+        self.last_used_proxy = proxy
+
+        if self.session is not None and not self.session.closed and self.session_proxy != proxy:
+            await self.session.close()
+            self.session = None
+
         if self.session is None or self.session.closed:
-            proxy = None
-            if url:
-                proxy = get_preferred_proxy_for_url(url, self.extractor_name, self.proxies)
-            else:
-                proxy = self._get_random_proxy()
-            if proxy:
-                proxy = self._normalize_proxy_url(proxy)
-                self.last_used_proxy = proxy
+            self.session_proxy = proxy
             self.session = self._build_session_for_proxy(proxy)
         return self.session
 
@@ -916,3 +923,4 @@ class VixSrcExtractor:
             except Exception:
                 pass
             self.session = None
+            self.session_proxy = None

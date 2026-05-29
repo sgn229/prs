@@ -100,9 +100,15 @@ class HLSProxyCoreMixin:
         logger.debug("Refreshed segment token: %s -> %s", segment_url[-60:], fresh_url[-60:])
         return fresh_url
 
-    async def _refresh_captured_hls_for_segment(self, segment_url: str) -> bool:
+    async def _refresh_captured_hls_for_segment(
+        self,
+        segment_url: str,
+        bypass_warp: bool = False,
+        forced_proxy: str | None = None,
+    ) -> bool:
         """Re-extract a captured HLS source that contains the requested segment."""
         matches = self._captured_hls_matches_for_segment(segment_url)
+        forced_proxy = urllib.parse.unquote(forced_proxy) if forced_proxy else None
 
         seen_sources = set()
         for _, source_url, captured_headers, entry_ttl in sorted(matches, key=lambda item: item[0], reverse=True):
@@ -110,13 +116,23 @@ class HLSProxyCoreMixin:
                 continue
             seen_sources.add(source_url)
             try:
-                extractor = await self.get_extractor(source_url, captured_headers)
-                refreshed = await extractor.extract(
-                    source_url,
-                    request_headers=captured_headers,
-                    force_refresh=True,
-                    background_refresh=True,
-                )
+                proxy_token = SELECTED_PROXY_CONTEXT.set(forced_proxy)
+                try:
+                    extractor = await self.get_extractor(
+                        source_url,
+                        captured_headers,
+                        bypass_warp=bypass_warp,
+                    )
+                    refreshed = await extractor.extract(
+                        source_url,
+                        request_headers=captured_headers,
+                        force_refresh=True,
+                        background_refresh=True,
+                        bypass_warp=bypass_warp,
+                        proxy=forced_proxy,
+                    )
+                finally:
+                    SELECTED_PROXY_CONTEXT.reset(proxy_token)
                 refreshed_headers = refreshed.get("request_headers", captured_headers)
                 refreshed_manifests = list((refreshed.get("captured_manifests") or {}).items())
                 if not refreshed_manifests and refreshed.get("captured_manifest"):
@@ -144,7 +160,13 @@ class HLSProxyCoreMixin:
                 logger.debug("Captured HLS on-demand refresh failed for %s: %s", source_url, exc)
         return False
 
-    def _schedule_segment_count_refresh(self, segment_url: str, threshold: int = 10) -> bool:
+    def _schedule_segment_count_refresh(
+        self,
+        segment_url: str,
+        threshold: int = 10,
+        bypass_warp: bool = False,
+        forced_proxy: str | None = None,
+    ) -> bool:
         """Refresh VixSrc before its approximate 12-segment token limit."""
         if not self._is_vixsrc_signed_segment(segment_url):
             return False
@@ -175,7 +197,11 @@ class HLSProxyCoreMixin:
             return False
 
         async def refresh_in_background():
-            refreshed = await self._refresh_captured_hls_for_segment(segment_url)
+            refreshed = await self._refresh_captured_hls_for_segment(
+                segment_url,
+                bypass_warp=bypass_warp,
+                forced_proxy=forced_proxy,
+            )
             if refreshed:
                 logger.info(
                     "captured HLS proactive refresh after %d VixSrc segments: %s",
