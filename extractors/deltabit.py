@@ -11,14 +11,13 @@ from bs4 import BeautifulSoup
 from config import (
     FLARESOLVERR_URL, 
     FLARESOLVERR_TIMEOUT, 
-    get_proxy_for_url, 
-    TRANSPORT_ROUTES, 
     get_solver_proxy_url, 
     GLOBAL_PROXIES,
-    get_connector_for_proxy
+    get_connector_for_proxy,
+    get_preferred_proxy_for_url,
 )
 from utils.cookie_cache import CookieCache
-from utils.solver_manager import solver_manager
+from utils.solver_manager import solver_manager, ensure_flaresolverr
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +59,14 @@ class DeltabitExtractor:
         return self.session
 
     async def _request_flaresolverr(self, cmd: str, url: str = None, post_data: str = None, session_id: str = None, wait: int = 0, headers: dict | None = None) -> dict:
+        await ensure_flaresolverr()
         endpoint = f"{settings.flaresolverr_url.rstrip('/')}/v1"
         payload = {"cmd": cmd, "maxTimeout": (settings.flaresolverr_timeout + 60) * 1000}
         if wait > 0: payload["wait"] = wait
         fs_headers = {}
         if url: 
             payload["url"] = url
-            proxy = get_proxy_for_url(url, TRANSPORT_ROUTES, self.proxies, bypass_warp=self.bypass_warp_active)
+            proxy = get_preferred_proxy_for_url(url, "deltabit", self.proxies, self.bypass_warp_active)
             if proxy:
                 payload["proxy"] = {"url": proxy}
                 fs_headers["X-Proxy-Server"] = get_solver_proxy_url(proxy)
@@ -95,7 +95,7 @@ class DeltabitExtractor:
                 return res
         
         logger.info(f"🔍 [Cache Miss] Extracting new link for: {normalized_url}")
-        proxy = get_proxy_for_url(normalized_url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
+        proxy = get_preferred_proxy_for_url(normalized_url, "deltabit", self.proxies, self.bypass_warp_active)
         final_session_id = await solver_manager.get_persistent_session("deltabit", proxy)
         session_id = final_session_id
         is_persistent = True # Always persistent for this key
@@ -121,17 +121,16 @@ class DeltabitExtractor:
                 except: pass
                 return None
 
-            pref_p = get_proxy_for_url(url, TRANSPORT_ROUTES, self.proxies, self.bypass_warp_active)
-            tasks = [
-                asyncio.create_task(try_path(pref_p)) if pref_p else None,
-                asyncio.create_task(try_path(None)),
-                asyncio.create_task(try_path(None, is_fs=True))
-            ]
-            tasks = [t for t in tasks if t]
-            
+            pref_p = get_preferred_proxy_for_url(url, "deltabit", self.proxies, self.bypass_warp_active)
             html = None
-            for task in asyncio.as_completed(tasks):
-                res = await task
+            attempts = []
+            if pref_p:
+                attempts.append((pref_p, False))
+            attempts.append((None, True))
+            attempts.append((None, False))
+
+            for attempt_proxy, use_fs in attempts:
+                res = await try_path(attempt_proxy, is_fs=use_fs)
                 if res:
                     html, url, ua, new_cookies = res
                     cookies.update(new_cookies)
