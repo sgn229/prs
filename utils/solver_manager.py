@@ -49,25 +49,34 @@ async def ensure_flaresolverr() -> bool:
     if not FLARESOLVERR_URL:
         return False
 
+    wait_for_start = False
     async with _flaresolverr_lock:
         if _flaresolverr_starting:
             _flaresolverr_last_used = time.time()
-            return True
-        if await _is_flaresolverr_alive():
+            wait_for_start = True
+        elif await _is_flaresolverr_alive():
             _flaresolverr_last_used = time.time()
             return True
-        if _flaresolverr_process and _flaresolverr_process.returncode is None:
+        elif _flaresolverr_process and _flaresolverr_process.returncode is None:
             _flaresolverr_last_used = time.time()
             return True
+        else:
+            script = await _find_flaresolverr_script()
+            if not script:
+                logger.warning("FlareSolverr script not found, skipping auto-start")
+                return False
 
-        script = await _find_flaresolverr_script()
-        if not script:
-            logger.warning("FlareSolverr script not found, skipping auto-start")
-            return False
+            fs_dir = os.path.dirname(os.path.dirname(script))
+            logger.info("Starting FlareSolverr lazily from %s ...", fs_dir)
+            _flaresolverr_starting = True
 
-        fs_dir = os.path.dirname(os.path.dirname(script))
-        logger.info("Starting FlareSolverr lazily from %s ...", fs_dir)
-        _flaresolverr_starting = True
+    if wait_for_start:
+        for _ in range(30):
+            await asyncio.sleep(1)
+            if await _is_flaresolverr_alive():
+                _flaresolverr_last_used = time.time()
+                return True
+        return False
 
     # Sblocca il lock durante l'avvero (può richiedere secondi)
     try:
