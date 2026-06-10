@@ -557,10 +557,13 @@ class VixSrcExtractor:
         html = solution.get("response", "")
         if html and not any(marker in html.lower() for marker in ("just a moment", "cf-challenge", "checking your browser")):
             logger.info("FlareSolverr success for %s", url)
-            new_cookies = {c["name"]: c["value"] for c in solution.get("cookies", [])}
+            raw_cookies = list(solution.get("cookies", []))
+            logger.info("FlareSolverr cookies count: %d, keys: %s", len(raw_cookies), [c.get("name") for c in raw_cookies[:5]])
+            new_cookies = {c["name"]: c["value"] for c in raw_cookies if c.get("name")}
             if new_cookies:
                 self.cookies.update(new_cookies)
                 self._save_cached_cookies(url)
+                logger.info("FlareSolverr saved %d cookies", len(new_cookies))
             return html
 
         logger.warning("FlareSolverr vixsrc returned Cloudflare challenge for %s", url)
