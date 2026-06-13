@@ -20,21 +20,9 @@ python -m pip install -r requirements.txt --quiet
 python -m pip install pycryptodome --quiet
 python -m playwright install chromium
 
-:: --- 3. FlareSolverr Setup ---
-echo Checking FlareSolverr...
-IF NOT EXIST "flaresolverr\" (
-    echo Downloading FlareSolverr...
-    git clone https://github.com/FlareSolverr/FlareSolverr.git flaresolverr
-    echo Installing FlareSolverr dependencies...
-    pushd flaresolverr
-    python -m pip install -r requirements.txt --quiet
-    popd
-) ELSE (
-    :: FlareSolverr already installed, starts lazily on demand
-    echo [OK] FlareSolverr installed, will start on demand
-)
-
-:: --- 4. FlareSolverr is LAZY (starts via Python code when first needed) ---
+:: --- 3. SeleniumBase Driver Setup ---
+echo Ensuring SeleniumBase drivers are set up...
+python -m seleniumbase install chromedriver
 
 :: --- 5. Start EasyProxy ---
 echo.

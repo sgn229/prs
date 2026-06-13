@@ -7,8 +7,8 @@ import socket
 from urllib.parse import urlparse
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp.resolver import DefaultResolver
-from config import FLARESOLVERR_TIMEOUT, FLARESOLVERR_URL, get_connector_for_proxy, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback
-from config import PROXY_TEST_TIMEOUT, PROXY_TEST_CONCURRENCY
+from config import FLARESOLVERR_TIMEOUT, FLARESOLVERR_URL, get_connector_for_proxy, get_solver_proxy_url, build_proxy_with_auth, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback
+import config as _cfg
 from utils.solver_manager import ensure_flaresolverr
 
 
@@ -124,6 +124,34 @@ class MaxstreamExtractor:
 
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
+
+        # Load from solver cache if empty
+        if not self.cookies and "maxstream" in domain:
+            import json
+            import os
+            import time
+            cache_file = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "cache", "solver_cookies.json"))
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r") as f:
+                        cache_data = json.load(f)
+                    domain_cache = cache_data.get(domain)
+                    if domain_cache:
+                        # Check timestamp (must be less than 10 mins old)
+                        if time.time() - domain_cache.get("timestamp", 0) < 600:
+                            cookies_list = domain_cache.get("cookies", [])
+                            self.cookies = {c["name"]: c["value"] for c in cookies_list}
+                            ua = domain_cache.get("userAgent")
+                            if ua:
+                                self.base_headers["user-agent"] = ua
+                                self.base_headers["User-Agent"] = ua
+                                if "headers" in kwargs:
+                                    kwargs["headers"]["user-agent"] = ua
+                                    kwargs["headers"]["User-Agent"] = ua
+                            logger.info(f"Maxstream: loaded {len(self.cookies)} cached cookies from solver cache for domain: {domain}")
+                except Exception as e:
+                    logger.debug(f"Failed to load solver cookies: {e}")
+
         headers = kwargs.get("headers") or self.base_headers
         post_data = kwargs.get("data")
         proxies = self._get_proxies_for_url(url)
@@ -151,11 +179,20 @@ class MaxstreamExtractor:
                     if self.cookies:
                         call_kwargs["cookies"] = self.cookies
                     async with session.request(method, url, ssl=False, **call_kwargs) as response:
+                        content = await response.read() if is_binary else await response.text()
+                        status = response.status
+                        
+                        if not is_binary and self._is_cloudflare_challenge(content, status):
+                            logger.info("Cloudflare challenge page detected in Maxstream direct fetch (status %s). Triggering solver...", status)
+                            fs_result = await self._fetch_with_flaresolverr(url, method=method, headers=headers, post_data=post_data)
+                            if fs_result:
+                                return fs_result
+                                
                         response.raise_for_status()
                         self.selected_proxy = proxy
                         for k, v in response.cookies.items():
                             self.cookies[k] = v.value
-                        return await response.read() if is_binary else await response.text()
+                        return content
             except Exception as e:
                 last_error = e
                 logger.debug(f"Path failed ({proxy or 'direct'}): {e}")
@@ -200,7 +237,7 @@ class MaxstreamExtractor:
                     cookies=self.cookies or None,
                     proxies=proxies_arg,
                     impersonate=profile,
-                    timeout=PROXY_TEST_TIMEOUT,
+                    timeout=_cfg.PROXY_TEST_TIMEOUT,
                     allow_redirects=True,
                     verify=False,
                 )
@@ -215,7 +252,7 @@ class MaxstreamExtractor:
                 return 0, None, {}, proxy, profile
 
         for profile in ("chrome131", "chrome124", "edge101"):
-            semaphore = asyncio.Semaphore(PROXY_TEST_CONCURRENCY)
+            semaphore = asyncio.Semaphore(_cfg.PROXY_TEST_CONCURRENCY)
 
             async def _limited(proxy):
                 async with semaphore:
@@ -265,7 +302,9 @@ class MaxstreamExtractor:
 
         fs_headers = {}
         if proxy:
-            payload["proxy"] = {"url": proxy}
+            p = build_proxy_with_auth(proxy)
+            if p:
+                payload["proxy"] = p
             fs_headers["X-Proxy-Server"] = get_solver_proxy_url(proxy)
 
         cookie_header = (headers or {}).get("Cookie") or (headers or {}).get("cookie")
@@ -312,6 +351,15 @@ class MaxstreamExtractor:
             return html
         logger.debug("FlareSolverr maxstream returned Cloudflare challenge or empty response")
         return None
+
+    def _is_cloudflare_challenge(self, html: str, status: int) -> bool:
+        """Determines if the response is a Cloudflare verification challenge screen."""
+        if status in (403, 503):
+            return True
+        low_html = html.lower()
+        if "cloudflare" in low_html and ("ray id" in low_html or "captcha" in low_html or "turnstile" in low_html or "challenge-platform" in low_html):
+            return True
+        return False
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Maxstream URL.
