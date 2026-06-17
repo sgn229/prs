@@ -2,7 +2,41 @@ import logging
 import sys
 import os
 import asyncio
+import aiohttp
 from aiohttp import web
+
+# Monkey-patch aiohttp ClientSession to count upstream response bytes
+# for the admin network speed widget (download = fetched for clients).
+def _patch_client_session_for_upstream_bytes():
+    try:
+        from config import record_proxy_net_recv
+    except Exception:
+        return
+
+    _trace = aiohttp.TraceConfig()
+    _trace._easyproxy_upstream = True
+
+    async def _on_chunk(session, trace_config_ctx, params):
+        try:
+            chunk = getattr(params, 'chunk', None)
+            if chunk:
+                record_proxy_net_recv(len(chunk))
+        except Exception:
+            pass
+
+    _trace.on_response_chunk_received.append(_on_chunk)
+    _orig_init = aiohttp.ClientSession.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        trace_configs = list(kwargs.get('trace_configs') or [])
+        if not any(getattr(tc, '_easyproxy_upstream', False) for tc in trace_configs):
+            trace_configs.append(_trace)
+            kwargs['trace_configs'] = trace_configs
+        return _orig_init(self, *args, **kwargs)
+
+    aiohttp.ClientSession.__init__ = _patched_init
+
+_patch_client_session_for_upstream_bytes()
 
 # Configura logging PRIMA di qualsiasi import che possa emettere log
 logging.basicConfig(
@@ -15,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from services.proxy import HLSProxy
 from services.ffmpeg_manager import FFmpegManager
-from config import PORT, RECORDINGS_DIR, APP_VERSION, record_proxy_net_sent, record_proxy_net_recv
+from config import PORT, RECORDINGS_DIR, APP_VERSION, record_proxy_net_sent
 from services.recording_manager import RecordingManager
 from routes.recordings import setup_recording_routes
 
@@ -23,14 +57,9 @@ logger = logging.getLogger(__name__)
 
 @web.middleware
 async def proxy_net_middleware(request, handler):
-    """Count bytes handled by EasyProxy for the admin network speed widget."""
-    try:
-        cl = request.headers.get('Content-Length')
-        if cl:
-            record_proxy_net_recv(int(cl))
-    except Exception:
-        pass
-
+    """Count bytes sent by EasyProxy to clients for the network speed widget.
+    Upstream bytes (what EasyProxy downloads for clients) are counted via an
+    aiohttp trace config injected into all ClientSession instances."""
     response = await handler(request)
 
     try:

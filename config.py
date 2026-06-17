@@ -11,7 +11,7 @@ import threading
 from dotenv import load_dotenv
 from config_store import get as _cfg_get, set as _cfg_set, get_all as _cfg_get_all
 
-APP_VERSION = "2.9.21"
+APP_VERSION = "2.9.22"
 
 _proxy_source_cache: dict[str, tuple[float, list]] = {}
 _PROXY_SOURCE_TTL = 600
