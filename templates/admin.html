@@ -789,11 +789,13 @@ async function loadConfig() {
         }
 
         // Network speed (EasyProxy traffic only)
+        // proxy_net.sent = data served to clients (what users download)
+        // proxy_net.recv = data received from clients (requests)
         if (config.system_stats && config.system_stats.proxy_net) {
             const net = config.system_stats.proxy_net;
-            document.getElementById('net-down').textContent = formatSpeed(net.recv);
-            document.getElementById('net-up').textContent = formatSpeed(net.sent);
-            document.getElementById('net-speed').textContent = formatSpeed(net.recv + net.sent) + ' total';
+            document.getElementById('net-down').textContent = formatSpeed(net.sent);
+            document.getElementById('net-up').textContent = formatSpeed(net.recv);
+            document.getElementById('net-speed').textContent = formatSpeed(net.sent + net.recv) + ' total';
         }
 
         renderActiveStreams(config.active_streams);
@@ -1294,11 +1296,13 @@ setInterval(async () => {
                 document.getElementById('disk-bar').style.width = stats.disk.percent + '%';
                 document.getElementById('disk-details').textContent = `${formatBytes(stats.disk.used)} / ${formatBytes(stats.disk.total)} (Free: ${formatBytes(stats.disk.free)})`;
             }
+            // proxy_net.sent = data served to clients (what users download)
+            // proxy_net.recv = data received from clients (requests)
             if (tempConfig.system_stats && tempConfig.system_stats.proxy_net) {
                 const net = tempConfig.system_stats.proxy_net;
-                document.getElementById('net-down').textContent = formatSpeed(net.recv);
-                document.getElementById('net-up').textContent = formatSpeed(net.sent);
-                document.getElementById('net-speed').textContent = formatSpeed(net.recv + net.sent) + ' total';
+                document.getElementById('net-down').textContent = formatSpeed(net.sent);
+                document.getElementById('net-up').textContent = formatSpeed(net.recv);
+                document.getElementById('net-speed').textContent = formatSpeed(net.sent + net.recv) + ' total';
             }
             renderActiveStreams(tempConfig.active_streams);
             updateSpeedtestButtons(tempConfig);
