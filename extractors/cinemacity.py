@@ -76,25 +76,61 @@ class CinemaCityExtractor:
         return "; ".join(parts)
 
     async def _fetch_page(self, url: str, session_cookies: str = "") -> tuple[str, dict]:
-        await self._ensure_cookies()
-        cookie_str = self._build_cookie_str(session_cookies)
+        await ensure_flaresolverr()
 
-        request_kwargs = {}
-        if self.last_used_proxy:
-            request_kwargs["proxies"] = {"http": self.last_used_proxy, "https": self.last_used_proxy}
+        # Always fetch the movie URL directly via FlareSolverr (Camoufox) to solve and fetch in one go
+        logger.info(f"CinemaCity: fetching page via FlareSolverr for {url}")
+        endpoint = f"{self.flaresolverr_url.rstrip('/')}/v1"
+        proxies_to_try = get_ordered_proxies_for_url(self.base_url, "cinemacity", self.proxies)
+        if should_allow_direct_fallback(proxies_to_try):
+            proxies_to_try.append(None)
 
-        async with AsyncSession(impersonate="chrome124") as sess:
-            r = await sess.get(url, headers={
-                "User-Agent": self._user_agent,
-                "Cookie": cookie_str,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Referer": "https://cinemacity.cc/",
-            }, timeout=_cfg.PROXY_TEST_TIMEOUT, **request_kwargs)
-            html = r.text
-            resp_cookies = dict(r.cookies) if hasattr(r, 'cookies') else {}
-            logger.info(f"CinemaCity: curl_cffi status={r.status_code} len={len(html)}")
-            return html, resp_cookies
+        parsed_url = urllib.parse.urlparse(url)
+        fs_cookies = []
+
+        # Add DLE login/session cookies if provided
+        if session_cookies:
+            for item in session_cookies.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    fs_cookies.append({
+                        "name": k.strip(),
+                        "value": v.strip(),
+                        "domain": parsed_url.hostname,
+                        "path": "/",
+                        "secure": parsed_url.scheme == "https"
+                    })
+
+        for proxy in proxies_to_try:
+            payload = {
+                "cmd": "request.get",
+                "url": url,
+                "maxTimeout": (self.flaresolverr_timeout + 60) * 1000,
+            }
+            if fs_cookies:
+                payload["cookies"] = fs_cookies
+            if proxy:
+                p = build_proxy_with_auth(proxy)
+                if p:
+                    payload["proxy"] = p
+            
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=self.flaresolverr_timeout + 95)) as r:
+                        d = await r.json()
+                
+                if d.get("status") == "ok":
+                    sol = d.get("solution", {})
+                    html = sol.get("response", "")
+                    resp_cookies = {c["name"]: c["value"] for c in sol.get("cookies", [])}
+                    self._cookies = resp_cookies
+                    self._user_agent = sol.get("userAgent")
+                    self.last_used_proxy = self._normalize_proxy_url(proxy) if proxy else None
+                    return html, resp_cookies
+            except Exception as e:
+                logger.warning(f"CinemaCity: FlareSolverr fetch attempt failed via {proxy or 'direct'}: {e}")
+
+        raise ExtractorError("CinemaCity: FlareSolverr page fetch failed for all proxies")
 
     def base64_decode(self, data: str) -> str:
         try:
@@ -277,14 +313,27 @@ class CinemaCityExtractor:
         if not file_data:
             file_data = self._parse_script_data(html)
 
+        iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']*player\.php[^"\']*)["\']', html, re.I)
+        player_referer = urllib.parse.urljoin(url, iframe_match.group(1)) if iframe_match else url
+
+        # If not found on main page, fetch and parse the iframe page
+        if not file_data and iframe_match:
+            logger.info(f"CinemaCity: stream data not on main page, fetching iframe: {player_referer}")
+            try:
+                iframe_html, iframe_cookies = await self._fetch_page(player_referer, cookies)
+                if iframe_cookies:
+                    dynamic_cookies.update(iframe_cookies)
+                file_data = self._parse_atob_data(iframe_html)
+                if not file_data:
+                    file_data = self._parse_script_data(iframe_html)
+            except Exception as e:
+                logger.warning(f"CinemaCity: failed to fetch/parse iframe: {e}")
+
         if not file_data:
-            logger.warning("CinemaCity: no stream data in page (len=%d)", len(html))
+            logger.warning("CinemaCity: no stream data in page or iframe (len=%d)", len(html))
             snippet = html[3000:5000] if len(html) > 5000 else html[:2000]
             logger.debug("CinemaCity snippet: %s", snippet[:500])
             raise ExtractorError("Stream not found")
-
-        iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']*player\.php[^"\']*)["\']', html, re.I)
-        player_referer = urllib.parse.urljoin(url, iframe_match.group(1)) if iframe_match else url
 
         stream_url = self.pick_stream(file_data, media_type, season, episode)
         if not stream_url: raise ExtractorError("Pick failed")

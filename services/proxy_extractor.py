@@ -376,9 +376,13 @@ class HLSProxyExtractorHandlerMixin:
                 import traceback
                 traceback.print_exc()
 
+            status_code = 500
+            if type(e).__name__ == "ExtractorError" or "not found" in error_message or "pick failed" in error_message:
+                status_code = 404
+
             return web.json_response(
                 {"error": str(e), "status": "error"},
-                status=500
+                status=status_code
             )
         finally:
             BYPASS_WARP_CONTEXT.reset(token)

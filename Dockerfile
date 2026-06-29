@@ -21,8 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cloudflare-warp \
     netcat-openbsd \
     ffmpeg \
-    chromium \
     xvfb \
+    xdotool \
+    fluxbox \
+    xauth \
     python3-tk \
     python3-dev \
     libnss3 \
@@ -44,7 +46,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglu1-mesa \
     ca-certificates \
     fonts-liberation \
-    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # Optional userspace WARP tools. They allow WARP as a local SOCKS5 proxy
@@ -81,17 +82,16 @@ RUN set -eux; \
     chmod +x /usr/local/bin/speedtest; \
     rm -f /tmp/speedtest.tgz
 
-# 2. Environment Settings
-ENV PYTHONPATH=/app
-ENV CHROME_EXE_PATH=/usr/bin/chromium
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROME_DRIVER_PATH=/usr/bin/chromedriver
-
-
-# 4. EasyProxy Dependencies
+# 2. EasyProxy Dependencies
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 3. Install Playwright Firefox (required by Camoufox)
+RUN python -m playwright install firefox
+
+# 4. Environment Settings
+ENV PYTHONPATH=/app
 
 # Copia esplicita
 COPY . .

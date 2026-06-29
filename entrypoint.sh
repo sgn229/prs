@@ -108,11 +108,15 @@ echo "Starting Xvfb on display :99..."
 Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
 export DISPLAY=:99
 
-# Wait for Xvfb to be fully initialized before launching Python/Gunicorn
-echo "Waiting for Xvfb to initialize..."
+# Start fluxbox lightweight WM (needed for pyautogui window focus)
+echo "Starting fluxbox WM..."
+fluxbox > /dev/null 2>&1 &
+
+# Wait for Xvfb and fluxbox to be fully initialized
+echo "Waiting for Xvfb and fluxbox to initialize..."
 sleep 3
 
-echo "SeleniumBase (UC mode) will run under Xvfb display :99 (on-demand via Python)"
+echo "Camoufox (Playwright Firefox) will run under Xvfb display :99 (on-demand via Python)"
 
 echo "Starting EasyProxy..."
 cd /app
