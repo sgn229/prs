@@ -56,37 +56,11 @@ class HLSProxyCoreMixin:
         asyncio.create_task(self._cleanup_stale_sessions())
 
     async def _cleanup_stale_sessions(self):
-        """Periodically close stale extractors unused for >5m."""
+        """Periodic cleanup of stale CDN tokens (extractor cache is disabled —
+        extractors are closed immediately in the finally block)."""
         while True:
             await asyncio.sleep(60)
             now = time.time()
-            stale_streams = [
-                stream_ref for stream_ref, t in self._extractor_stream_atimes.items()
-                if now - t > 300
-            ]
-            for stream_ref in stale_streams:
-                self._extractor_stream_atimes.pop(stream_ref, None)
-            stale_ext = [
-                k for k, t in self._extractor_atimes.items()
-                if (
-                    now - t > 300
-                    and k in self.extractors
-                    and not any(ref[0] == k for ref in self._extractor_stream_atimes)
-                )
-            ]
-            for key in stale_ext:
-                ext = self.extractors.pop(key, None)
-                self._extractor_atimes.pop(key, None)
-                for stream_ref in list(self._extractor_stream_atimes):
-                    if stream_ref[0] == key:
-                        self._extractor_stream_atimes.pop(stream_ref, None)
-                if ext and hasattr(ext, 'close'):
-                    try:
-                        await ext.close()
-                    except Exception:
-                        pass
-                logger.info("🧹 Cleaned stale extractor: %s", key)
-
             # Cleanup stale CDN tokens (>5 min since last use)
             stale_tokens = [
                 k for k, t in getattr(self, '_renewed_cdn_token_atimes', {}).items()

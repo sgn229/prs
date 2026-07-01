@@ -732,19 +732,6 @@ class HLSProxyStreamingMixin:
             if resp_ctx is None:
                 # curl_only (embedst): curl_cffi fallito, live offline → return 503 subito
                 logger.debug("curl_only: upstream offline, returning 503")
-                # ⚡ Immediate cleanup of the dead extractor (stream is offline, won't recover).
-                _ek = request.query.get("extractor_key", "")
-                if _ek and _ek in self.extractors:
-                    _dead = self.extractors.pop(_ek, None)
-                    self._extractor_atimes.pop(_ek, None)
-                    for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek]:
-                        self._extractor_stream_atimes.pop(_sr, None)
-                    if _dead and hasattr(_dead, "close"):
-                        try:
-                            await _dead.close()
-                        except Exception:
-                            pass
-                    logger.info(f"🧹 Immediate cleanup of dead extractor: {_ek} (stream offline)")
                 return web.Response(
                     status=503,
                     text="Stream offline",
@@ -1204,6 +1191,19 @@ class HLSProxyStreamingMixin:
         except Exception as exc:
             logger.debug("Re-extract for segment 403 failed: %s", exc)
             return None
+        finally:
+            # 🚫 Cache disabilitata: chiudi subito l'estrattore re-estratto.
+            _ek = self._extractor_key_for_instance(extractor) if extractor else None
+            if _ek and _ek in self.extractors:
+                _ext = self.extractors.pop(_ek, None)
+                self._extractor_atimes.pop(_ek, None)
+                for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek]:
+                    self._extractor_stream_atimes.pop(_sr, None)
+                if _ext and hasattr(_ext, "close"):
+                    try:
+                        await _ext.close()
+                    except Exception:
+                        pass
 
         captured_manifests = refreshed.get("captured_manifests") or {}
         master_url = refreshed.get("destination_url")
