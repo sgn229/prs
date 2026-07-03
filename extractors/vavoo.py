@@ -1,12 +1,13 @@
 import asyncio
 import logging
+import re
 import time
 import socket
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp_socks import ProxyConnector
 from typing import Optional, Dict, Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse, parse_qs
 from config import get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
 import random
@@ -190,13 +191,37 @@ class VavooExtractor:
             logger.warning(f"Resolve exception: {e}")
             return None
 
-    def _build_ts_fallback_url(self, play_url: str, ts_sig: str) -> Optional[str]:
-        """Convert vavoo play URL to live2 TS URL with vavoo_auth."""
-        import re
-        m = re.search(r'/play/([^/?#]+)', play_url)
-        if not m:
+    async def _resolve_watch_page(self, url: str) -> Optional[str]:
+        """Fetch a /watch page and extract the underlying /play/ URL."""
+        if "/watch" not in url:
             return None
-        token = m.group(1)
+        session = await self._get_session(url)
+        headers = {
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "accept": "text/html",
+        }
+        try:
+            async with session.get(url, headers=headers, timeout=10, ssl=False) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    m = re.search(r'/play/([a-zA-Z0-9]+)', text)
+                    if m:
+                        return f"https://vavoo.to/play/{m.group(1)}"
+        except Exception as e:
+            logger.warning(f"Failed to resolve watch page: {e}")
+        return None
+
+    def _build_ts_fallback_url(self, play_url: str, ts_sig: str) -> Optional[str]:
+        """Convert vavoo URL to live2 TS URL with vavoo_auth. Supports /play/TOKEN and /watch?live=X."""
+        m = re.search(r'/play/([^/?#]+)', play_url)
+        if m:
+            token = m.group(1)
+        else:
+            params = parse_qs(urlparse(play_url).query)
+            live_id = params.get('live', [None])[0]
+            if not live_id:
+                return None
+            token = live_id
         return f"https://www2.vavoo.to/live2/{token}.ts?n=1&b=5&vavoo_auth={quote_plus(ts_sig)}"
 
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
@@ -217,6 +242,16 @@ class VavooExtractor:
                     "Referer": "https://vavoo.to",
                     "Origin": "https://vavoo.to",
                 }
+
+        # Step 1b: If mediahubmx failed on a /watch link, extract the underlying /play/ URL from the page and retry
+        if not resolved_url and "/watch" in url:
+            play_url = await self._resolve_watch_page(url)
+            if play_url:
+                logger.info(f"Resolved watch page to play URL: {play_url}")
+                if sig:
+                    resolved_url = await self._resolve_via_mediahubmx(play_url, sig)
+                if not resolved_url:
+                    url = play_url
 
         # Step 2: Fallback — TS signature via ping2
         if not resolved_url:
