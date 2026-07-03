@@ -10,13 +10,11 @@ DYNAMIC_WARP_BYPASS_DOMAINS = (
     "strem.fun",
     "torrentio.strem.fun",
 )
-PROTECTED_CURL_DOMAINS = ("cinemacity.cc", "torrentio", "strem.fun")
+PROTECTED_CURL_DOMAINS = ("cinemacity.cc", "torrentio", "strem.fun", "strmd.st")
 MANIFEST_ONLY_CURL_DOMAINS = ("torrentio", "strem.fun")
 BROWSER_ACTIVITY_KEYS = (
     "dlstreams",
     "dlstreams_direct",
-    "embedsports",
-    "embedsports_direct",
 )
 
 
@@ -121,13 +119,6 @@ def should_use_short_captured_manifest_urls(original_url: str, host_param: str) 
     )
 
 
-def requires_captured_manifest_proxy(host_param: str | None, original_url: str, stream_url: str) -> bool:
-    host = (host_param or "").lower()
-    original = (original_url or "").lower()
-    stream = (stream_url or "").lower()
-    return host == "vidxgo" or "vidxgo" in original or "vidxgo" in stream
-
-
 def is_expired_embed_error(error_msg: str) -> bool:
     value = (error_msg or "").lower()
     return "expired vixsrc embed url" in value or (
@@ -183,7 +174,6 @@ __all__ = [
     "final_curl_request_url",
     "should_use_short_manifest_urls",
     "should_use_short_captured_manifest_urls",
-    "requires_captured_manifest_proxy",
     "is_expired_embed_error",
     "extractor_name_for_log",
     "is_browser_key_request",

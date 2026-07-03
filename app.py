@@ -2,6 +2,7 @@ import logging
 import sys
 import os
 import asyncio
+import aiohttp
 from aiohttp import web
 
 # Configura logging PRIMA di qualsiasi import che possa emettere log
@@ -180,7 +181,7 @@ def create_app():
         if filename.endswith('.ts'):
              # Create response, add headers, then prepare? No, FileResponse is unexpected.
              # Just pass headers.
-             headers['Content-Type'] = 'video/MP2T'
+             headers['Content-Type'] = 'video/mp2t'
              return web.FileResponse(file_path, headers=headers)
         
         return web.FileResponse(file_path, headers=headers)
@@ -204,6 +205,7 @@ def create_app():
     app.router.add_post('/api/admin/warp/toggle', proxy.handle_admin_api_warp_toggle)
     app.router.add_post('/api/admin/warp/reconnect', proxy.handle_admin_api_warp_reconnect)
     app.router.add_post('/api/admin/extractor/proxy', proxy.handle_admin_api_extractor_proxy)
+    app.router.add_post('/api/admin/speedtest', proxy.handle_admin_api_speedtest)
     # Setup recording/DVR routes
     setup_recording_routes(app, recording_manager)
     
@@ -212,8 +214,6 @@ def create_app():
     
     async def cleanup_handler(app):
         await proxy.cleanup()
-        from utils.solver_manager import shutdown_flaresolverr
-        await shutdown_flaresolverr()
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):

@@ -10,7 +10,7 @@ import base64
 import hashlib
 import socket
 import config_store
-from utils.solver_manager import try_shutdown_idle_flaresolverr
+
 import services.proxy_shared as _shared
 from services.proxy_shared import (
     logger,
@@ -50,360 +50,31 @@ class HLSProxyCoreMixin:
         encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
         return f"u_{encoded}"
 
-    def _refresh_segment_token(self, segment_url: str) -> str | None:
-        """
-        For signed-token CDN URLs (VidXgo), rewrite the query of the requested
-        segment so it uses the freshest token currently known in
-        `captured_hls_manifest_map`. Matches by segment path: the path
-        component (everything before `?`) is stable across token rotations,
-        while the query holds the rotating token.
-
-        Returns the rewritten URL, or None if no match (caller falls back to
-        the original URL).
-        """
-        try:
-            parsed = urllib.parse.urlparse(segment_url)
-        except Exception:
-            return None
-        if not parsed.query:
-            return None
-        seg_path = parsed.path
-        if not seg_path:
-            return None
-        # Only meaningful for hosts that put a rotating VidXgo-style `e=` token
-        # in the query.
-        q = urllib.parse.parse_qs(parsed.query)
-        if "e" not in q:
-            return None
-        # Scan all captured variant manifests. The most recently refreshed
-        # one wins (highest stored_at).
-        candidates = []
-        for entry in self.captured_hls_manifest_map.values():
-            captured_url, captured_manifest, _, stored_at, _, _ = entry
-            if not captured_manifest:
-                continue
-            # Signed CDNs may rotate hostnames and path prefixes together with
-            # tokens, so match the stable tail rather than the full URL/path.
-            for abs_seg in self._iter_hls_manifest_urls(captured_url, captured_manifest):
-                cand = urllib.parse.urlparse(abs_seg)
-                if self._segment_paths_match(seg_path, cand.path):
-                    candidates.append((stored_at, abs_seg))
-                    break
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        fresh_url = candidates[0][1]
-        if fresh_url == segment_url:
-            return None
-        logger.debug("Refreshed segment token: %s -> %s", segment_url[-60:], fresh_url[-60:])
-        return fresh_url
-
-    async def _refresh_captured_hls_for_segment(
-        self,
-        segment_url: str,
-        bypass_warp: bool = False,
-        forced_proxy: str | None = None,
-    ) -> bool:
-        """Re-extract a captured HLS source that contains the requested segment."""
-        matches = self._captured_hls_matches_for_segment(segment_url)
-        forced_proxy = urllib.parse.unquote(forced_proxy) if forced_proxy else None
-
-        seen_sources = set()
-        for _, source_url, captured_headers, entry_ttl in sorted(matches, key=lambda item: item[0], reverse=True):
-            if source_url in seen_sources:
-                continue
-            seen_sources.add(source_url)
-            try:
-                proxy_token = SELECTED_PROXY_CONTEXT.set(forced_proxy)
-                strict_proxy_token = STRICT_PROXY_CONTEXT.set(bool(forced_proxy))
-                try:
-                    extractor = await self.get_extractor(
-                        source_url,
-                        captured_headers,
-                        bypass_warp=bypass_warp,
-                    )
-                    refreshed = await extractor.extract(
-                        source_url,
-                        request_headers=captured_headers,
-                        force_refresh=True,
-                        background_refresh=True,
-                        bypass_warp=bypass_warp,
-                        proxy=forced_proxy,
-                    )
-                finally:
-                    SELECTED_PROXY_CONTEXT.reset(proxy_token)
-                    STRICT_PROXY_CONTEXT.reset(strict_proxy_token)
-                refreshed_headers = refreshed.get("request_headers", captured_headers)
-                refreshed_manifests = list((refreshed.get("captured_manifests") or {}).items())
-                if not refreshed_manifests and refreshed.get("captured_manifest"):
-                    refreshed_manifests = [(
-                        refreshed.get("destination_url"),
-                        refreshed.get("captured_manifest"),
-                    )]
-
-                stored_any = False
-                for refreshed_url, refreshed_manifest in refreshed_manifests:
-                    if not refreshed_url or not refreshed_manifest:
-                        continue
-                    await self.store_captured_hls_manifest(
-                        refreshed_url,
-                        refreshed_manifest,
-                        refreshed_headers,
-                        ttl=entry_ttl,
-                        source_url=source_url,
-                    )
-                    stored_any = True
-                if stored_any:
-                    logger.info("captured HLS refreshed on segment 403: %s", source_url)
-                    return True
-            except Exception as exc:
-                logger.debug("Captured HLS on-demand refresh failed for %s: %s", source_url, exc)
-        return False
-
-    def _captured_hls_matches_for_segment(self, segment_url: str):
-        try:
-            parsed = urllib.parse.urlparse(segment_url)
-        except Exception:
-            return []
-        if not parsed.path:
-            return []
-
-        matches = []
-        for entry in self.captured_hls_manifest_map.values():
-            captured_url, captured_manifest, captured_headers, stored_at, entry_ttl, source_url = entry
-            if not captured_manifest or not source_url:
-                continue
-            for abs_seg in self._iter_hls_manifest_urls(captured_url, captured_manifest):
-                cand = urllib.parse.urlparse(abs_seg)
-                if self._segment_paths_match(parsed.path, cand.path):
-                    matches.append((stored_at, source_url, captured_headers, entry_ttl))
-                    break
-        return matches
-
-    @staticmethod
-    def _iter_hls_manifest_urls(captured_url: str, captured_manifest: str):
-        base_query = urllib.parse.urlparse(captured_url).query
-        for line in captured_manifest.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            abs_url = urllib.parse.urljoin(captured_url, line)
-            parsed_abs = urllib.parse.urlparse(abs_url)
-            if base_query and not parsed_abs.query:
-                abs_url = urllib.parse.urlunparse(parsed_abs._replace(query=base_query))
-            yield abs_url
-
-    @staticmethod
-    def _parse_signed_expiry_ts(u: str) -> float | None:
-        """Parse HLS signed URL expiry from VidXgo `e=`."""
-        try:
-            params = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
-            raw_e = params.get("e", [None])[0]
-            if raw_e:
-                return float(raw_e) / 1000.0
-        except Exception:
-            return None
-        return None
-
-    @staticmethod
-    def _segment_paths_match(old_path: str, candidate_path: str) -> bool:
-        if old_path == candidate_path:
-            return True
-
-        old_parts = [part for part in old_path.split("/") if part]
-        candidate_parts = [part for part in candidate_path.split("/") if part]
-        if not old_parts or not candidate_parts:
-            return False
-
-        if old_parts[-1] != candidate_parts[-1]:
-            return False
-
-        common_tail = min(3, len(old_parts), len(candidate_parts))
-        return old_parts[-common_tail:] == candidate_parts[-common_tail:]
-
-    async def store_captured_hls_manifest(
-        self,
-        url: str,
-        manifest: str,
-        headers: dict,
-        ttl: int = 30,
-        source_url: str = None,
-    ) -> str:
-        now = time.time()
-
-        # Hard limit on manifest map
-        MAX_MANIFEST_ENTRIES = 500
-        if len(self.captured_hls_manifest_map) >= MAX_MANIFEST_ENTRIES:
-            oldest = sorted(self.captured_hls_manifest_map.keys(),
-                key=lambda k: self.captured_hls_manifest_map[k][3] if len(self.captured_hls_manifest_map[k]) > 3 else 0)[:50]
-            for key in oldest:
-                self.captured_hls_manifest_map.pop(key, None)
-                task = self.captured_hls_refresh_tasks.pop(key, None)
-                if task and not task.done():
-                    task.cancel()
-
-        expired_keys = [
-            key for key, v in self.captured_hls_manifest_map.items()
-            if now - v[3] > v[4]
-        ]
-        for key in expired_keys:
-            self.captured_hls_manifest_map.pop(key, None)
-            task = self.captured_hls_refresh_tasks.pop(key, None)
-            if task and not task.done():
-                task.cancel()
-
-        stable_key = self._captured_manifest_stable_key(source_url, url)
-        url_id = f"cm_{hashlib.md5(stable_key.encode()).hexdigest()[:12]}"
-        self.captured_hls_manifest_map[url_id] = (url, manifest, headers, now, ttl, source_url)
-
-        # Deduplicate refresh tasks by source_url, not url_id
-        if source_url and (
-            url_id not in self.captured_hls_refresh_tasks
-            or self.captured_hls_refresh_tasks[url_id].done()
-        ):
-            # Count active refresh tasks; refuse if too many
-            active_refresh = sum(1 for t in self.captured_hls_refresh_tasks.values() if not t.done())
-            if active_refresh > 100:
-                return url_id
-
-            async def refresh_loop():
-                try:
-                    while url_id in self.captured_hls_manifest_map:
-                        await asyncio.sleep(2)
-                        entry = self.captured_hls_manifest_map.get(url_id)
-                        if not entry:
-                            break
-                        captured_url, _, captured_headers, stored_at, entry_ttl, entry_source_url = entry
-                        expiry_ts = self._parse_signed_expiry_ts(captured_url)
-                        now_ts = time.time()
-                        if expiry_ts is not None:
-                            seconds_left = expiry_ts - now_ts
-                        else:
-                            seconds_left = entry_ttl - (now_ts - stored_at)
-                        if seconds_left > 60:
-                            await asyncio.sleep(min(seconds_left - 60, 60))
-                            continue
-                        if expiry_ts is None and now_ts - stored_at > entry_ttl:
-                            self.captured_hls_manifest_map.pop(url_id, None)
-                            break
-                        try:
-                            extractor = await self.get_extractor(
-                                entry_source_url,
-                                captured_headers,
-                            )
-                            refreshed = await extractor.extract(
-                                entry_source_url,
-                                request_headers=captured_headers,
-                                force_refresh=True,
-                                background_refresh=True,
-                            )
-                            captured_stable_key = self._captured_manifest_stable_key(
-                                entry_source_url,
-                                captured_url,
-                            )
-                            refreshed_manifests = list(
-                                (refreshed.get("captured_manifests") or {}).items()
-                            )
-                            if not refreshed_manifests and refreshed.get("captured_manifest"):
-                                refreshed_manifests = [(
-                                    refreshed.get("destination_url"),
-                                    refreshed.get("captured_manifest"),
-                                )]
-                            for refreshed_url, refreshed_manifest in reversed(refreshed_manifests):
-                                if refreshed_url and self._captured_manifest_stable_key(
-                                    entry_source_url,
-                                    refreshed_url,
-                                ) == captured_stable_key:
-                                    refreshed_headers = refreshed.get("request_headers", captured_headers)
-                                    self.captured_hls_manifest_map[url_id] = (
-                                        refreshed_url,
-                                        refreshed_manifest,
-                                        refreshed_headers,
-                                        time.time(),
-                                        entry_ttl,
-                                        entry_source_url,
-                                    )
-                                    logger.info(
-                                        "captured HLS refreshed %s (token_left=%.0fs)",
-                                        entry_source_url,
-                                        (self._parse_signed_expiry_ts(refreshed_url) or 0) - time.time(),
-                                    )
-                                    break
-                        except Exception as exc:
-                            logger.debug("Captured HLS background refresh failed for %s: %s", entry_source_url, exc)
-                except asyncio.CancelledError:
-                    pass
-                finally:
-                    self.captured_hls_refresh_tasks.pop(url_id, None)
-
-            self.captured_hls_refresh_tasks[url_id] = asyncio.create_task(refresh_loop())
-        return url_id
-
-    @staticmethod
-    def _captured_manifest_stable_key(source_url: str | None, manifest_url: str) -> str:
-        if not source_url:
-            return manifest_url
-
-        parsed = urllib.parse.urlparse(manifest_url)
-        path_parts = [part for part in parsed.path.split("/") if part]
-        suffix = "/".join(path_parts[-3:]) or manifest_url
-        volatile_params = {"e"}
-        stable_params = [
-            (key, value)
-            for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-            if key.lower() not in volatile_params
-        ]
-        stable_query = urllib.parse.urlencode(stable_params)
-        if stable_query:
-            suffix = f"{suffix}?{stable_query}"
-        return f"{source_url}|{suffix}"
-
     async def start_tasks(self):
         """Starts background tasks for the proxy."""
         asyncio.create_task(self._update_latest_version())
         asyncio.create_task(self._cleanup_stale_sessions())
 
     async def _cleanup_stale_sessions(self):
-        """Periodically close stale extractors unused for >5m."""
+        """Periodic cleanup of stale CDN tokens (extractor cache is disabled —
+        extractors are closed immediately in the finally block)."""
         while True:
             await asyncio.sleep(60)
             now = time.time()
-            stale_streams = [
-                stream_ref for stream_ref, t in self._extractor_stream_atimes.items()
+            # Cleanup stale CDN tokens (>5 min since last use)
+            stale_tokens = [
+                k for k, t in getattr(self, '_renewed_cdn_token_atimes', {}).items()
                 if now - t > 300
             ]
-            for stream_ref in stale_streams:
-                self._extractor_stream_atimes.pop(stream_ref, None)
-            stale_ext = [
-                k for k, t in self._extractor_atimes.items()
-                if (
-                    now - t > 300
-                    and k in self.extractors
-                    and not any(ref[0] == k for ref in self._extractor_stream_atimes)
-                )
-            ]
-            for key in stale_ext:
-                ext = self.extractors.pop(key, None)
-                self._extractor_atimes.pop(key, None)
-                for stream_ref in list(self._extractor_stream_atimes):
-                    if stream_ref[0] == key:
-                        self._extractor_stream_atimes.pop(stream_ref, None)
-                if ext and hasattr(ext, 'close'):
-                    try:
-                        await ext.close()
-                    except Exception:
-                        pass
-                logger.info("🧹 Cleaned stale extractor: %s", key)
-            for key, task in list(self.captured_hls_refresh_tasks.items()):
-                if task.done():
-                    self.captured_hls_refresh_tasks.pop(key, None)
-            await try_shutdown_idle_flaresolverr()
+            for k in stale_tokens:
+                self._renewed_cdn_tokens.pop(k, None)
+                self._renewed_cdn_token_atimes.pop(k, None)
+                logger.debug("🧹 Cleaned stale CDN token: %s", k[:8])
+
+
 
     async def get_warp_status(self) -> str:
         """Returns WARP status and fetches real external IP through WARP proxy."""
-        now = time.monotonic()
-        if now - getattr(self, '_warp_check_ts', 0) < 30:
-            return getattr(self, '_warp_cached', "Disconnected")
         _ENABLE_WARP = _shared.ENABLE_WARP
         _WARP_PROXY_URL = _shared.WARP_PROXY_URL
         result = "Disconnected"
@@ -429,9 +100,7 @@ class HLSProxyCoreMixin:
                     pass
             except (OSError, asyncio.TimeoutError):
                 pass
-        self._warp_cached = result
-        self._warp_check_ts = now
-        return self._warp_cached
+        return result
 
     async def reconnect_warp(self) -> dict:
         """Reconnect WARP to get a new IP. Tries warp-cli first, then wireproxy kill+restart."""
@@ -564,26 +233,55 @@ class HLSProxyCoreMixin:
     @staticmethod
     def _strip_fake_png_header_from_ts(content: bytes) -> bytes:
         """
-        Some providers prepend a fake 8-byte PNG signature to TS segments.
-        Strip it only when bytes after the header still match TS sync markers.
+        Some providers prepend a fake PNG payload to TS segments.
+        embed.st/strmd.st wraps segments as a minimal valid PNG (IHDR+IDAT+IEND,
+        ~70 bytes) followed by the raw MPEG-TS stream. ExoPlayer scans for the
+        TS sync byte and tolerates this; stricter players (MPV/hls.js used by
+        Stremio PC) do not, and stall forever.
+
+        We locate the first 0x47 sync byte that is followed by another 0x47 at
+        +188 bytes (the TS packet size), then strip everything before it. If no
+        such pattern is found we fall back to the legacy 8-byte PNG signature
+        strip so we don't regress providers that only prepend 8 bytes.
         """
+        if not content:
+            return content
+
+        # Fast path: not a PNG at all -> nothing to do.
         png_sig = b"\x89PNG\r\n\x1a\n"
-        if len(content) <= 8 or not content.startswith(png_sig):
+        if not content.startswith(png_sig):
             return content
 
-        ts_payload = content[8:]
-        # MPEG-TS sync byte is 0x47 at packet boundaries.
-        if not ts_payload or ts_payload[0] != 0x47:
-            return content
-        if len(ts_payload) > 188 and ts_payload[188] != 0x47:
-            return content
+        # Generic path: scan for the first TS sync byte (0x47) that repeats at
+        # +188. Bound the scan so we never iterate over a huge payload.
+        scan_limit = min(4096, len(content) - 188)
+        for i in range(0, scan_limit):
+            if content[i] == 0x47 and content[i + 188] == 0x47:
+                if i <= 8:
+                    return content  # already a clean TS
+                payload = content[i:]
+                # Sanity-check a few more packet boundaries to avoid false positives.
+                if len(payload) > 376 and payload[376] != 0x47:
+                    continue
+                logger.info(
+                    "Removed fake PNG header from TS segment (%d -> %d bytes, header=%d)",
+                    len(content), len(payload), i,
+                )
+                return payload
 
-        logger.info(
-            "Removed fake PNG header from TS segment (%d -> %d bytes)",
-            len(content),
-            len(ts_payload),
-        )
-        return ts_payload
+        # Legacy fallback: strip only the 8-byte PNG signature when the bytes
+        # right after it look like a TS packet.
+        if len(content) > 8:
+            ts_payload = content[8:]
+            if ts_payload and ts_payload[0] == 0x47:
+                if len(ts_payload) <= 188 or ts_payload[188] == 0x47:
+                    logger.info(
+                        "Removed fake PNG header from TS segment (%d -> %d bytes)",
+                        len(content), len(ts_payload),
+                    )
+                    return ts_payload
+
+        return content
 
     async def _compute_key_headers(
         self, key_url: str, secret_key: str, user_agent: str = None
@@ -733,49 +431,52 @@ class HLSProxyCoreMixin:
         # ✅ FIX: Decodifica il proxy se è URL-encoded
         if forced_proxy:
             forced_proxy = urllib.parse.unquote(forced_proxy)
+            if forced_proxy.lower() == "off":
+                forced_proxy = None
 
         proxy = forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp)
 
         prefer_default_family = prefer_default_family_for_url(url)
 
         if proxy:
-            is_warp = "127.0.0.1:1080" in proxy
-            if proxy in self.proxy_sessions:
-                cached_session = self.proxy_sessions[proxy]
-                if not cached_session.closed:
-                    if is_warp:
-                        return cached_session, proxy
-                    atime = self._proxy_session_atimes.get(proxy, 0)
-                    if time.time() - atime > 120:
-                        logger.info(f"🧹 Closing idle proxy session: {proxy}")
-                        del self.proxy_sessions[proxy]
-                        await cached_session.close()
+            async with self._proxy_session_lock:
+                is_warp = "127.0.0.1:1080" in proxy
+                if proxy in self.proxy_sessions:
+                    cached_session = self.proxy_sessions[proxy]
+                    if not cached_session.closed:
+                        if is_warp:
+                            return cached_session, proxy
+                        atime = self._proxy_session_atimes.get(proxy, 0)
+                        if time.time() - atime > 120:
+                            logger.info(f"🧹 Closing idle proxy session: {proxy}")
+                            del self.proxy_sessions[proxy]
+                            await cached_session.close()
+                        else:
+                            self._proxy_session_atimes[proxy] = time.time()
+                            return cached_session, proxy
                     else:
-                        self._proxy_session_atimes[proxy] = time.time()
-                        return cached_session, proxy
-                else:
-                    del self.proxy_sessions[proxy]
+                        del self.proxy_sessions[proxy]
 
-            # Create new session and cache it
-            logger.info(f"[NET] Creating proxy session: {proxy}")
-            try:
-                connector = get_connector_for_proxy(
-                    proxy,
-                    limit=0,
-                    limit_per_host=0,
-                    keepalive_timeout=60,
-                    family=socket.AF_INET,
-                )
-                timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30)
-                session = ClientSession(timeout=timeout, connector=connector)
-                self.proxy_sessions[proxy] = session
-                self._proxy_session_atimes[proxy] = time.time()
-                return session, proxy
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Failed to create proxy connector: {e}"
-                )
-                raise
+                # Create new session and cache it
+                logger.info(f"[NET] Creating proxy session: {proxy}")
+                try:
+                    connector = get_connector_for_proxy(
+                        proxy,
+                        limit=0,
+                        limit_per_host=0,
+                        keepalive_timeout=60,
+                        family=socket.AF_INET,
+                    )
+                    timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30)
+                    session = ClientSession(timeout=timeout, connector=connector)
+                    self.proxy_sessions[proxy] = session
+                    self._proxy_session_atimes[proxy] = time.time()
+                    return session, proxy
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ Failed to create proxy connector: {e}"
+                    )
+                    raise
 
         # Fallback to shared non-proxy session
         session = await self._get_session(prefer_default_family=prefer_default_family)
@@ -903,12 +604,9 @@ class HLSProxyCoreMixin:
         mark_proxy_dead(proxy_url, dead_duration=dead_duration)
 
     async def _resolve_url_id(self, url_id: str) -> str | None:
-        """Risolve un url_id nell'URL originale."""
+        """Risolve un url_id nell'URL originale (solo U_ base64 short URLs)."""
         if not url_id:
             return None
-        # CM IDs stored in captured_hls_manifest_map
-        if url_id.startswith("cm_") and url_id in self.captured_hls_manifest_map:
-            return self.captured_hls_manifest_map[url_id][0]
         # U_ IDs are base64-encoded URLs
         if url_id.startswith("u_"):
             try:
@@ -947,14 +645,6 @@ class HLSProxyCoreMixin:
                     await extractor.close()
             self._extractor_atimes.clear()
             self._extractor_stream_atimes.clear()
-
-            tasks = list(self.captured_hls_refresh_tasks.values())
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            self.captured_hls_refresh_tasks.clear()
-            self.captured_hls_manifest_map.clear()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
