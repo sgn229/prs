@@ -1,0 +1,25 @@
+name: Hugging Face Nightly Factory Rebuild
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # Ogni giorno alle 03:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: hf-space-rebuild
+  cancel-in-progress: true
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Hugging Face Factory Rebuild
+        run: |
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            "https://huggingface.co/api/spaces/sg229/pcpro/restart?factory=true"
+
+      - name: Rebuild completed
+        run: echo "Factory Rebuild richiesto con successo."
