@@ -2,7 +2,7 @@ name: Hugging Face Nightly Factory Rebuild
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # Ogni giorno alle 03:00 UTC
+    - cron: "0 3 * * *"   # ogni giorno alle 03:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -14,7 +14,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Trigger Hugging Face Factory Rebuild
+      - name: Check token validity
+        run: |
+          curl --fail --show-error --silent \
+            -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            https://huggingface.co/api/whoami-v2
+
+      - name: Trigger Factory Rebuild
         run: |
           curl --fail --show-error --silent \
             -X POST \
