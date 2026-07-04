@@ -19,7 +19,7 @@ jobs:
           curl --fail --show-error --silent \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-            "https://huggingface.co/api/spaces/sg229/pcpro/restart?factory=true"
+            "https://huggingface.co/spaces/g229/pcpro/restart?factory=true"
 
       - name: Rebuild completed
         run: echo "Factory Rebuild richiesto con successo."
