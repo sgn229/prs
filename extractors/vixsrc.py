@@ -64,6 +64,8 @@ class _CurlResponse:
 
 class VixSrcExtractor:
     """VixSrc URL extractor per risolvere link VixSrc."""
+    # Includes API/embed fetches and the solver's startup + 60s challenge budget.
+    REQUEST_TIMEOUT_TOTAL = 180
     def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = None):
         self.bypass_warp_active = bypass_warp if bypass_warp is not None else False  # Use WARP by default
         self.request_headers = request_headers
@@ -521,7 +523,11 @@ class VixSrcExtractor:
                 if exc:
                     last_error = exc
 
-        if challenge_detected:
+        # A VixSrc 403 can be a bare block page without Cloudflare's usual
+        # challenge markers.  When a route exists, give FlareSolverr a chance
+        # anyway; this is especially important for the explicit DIRECT route
+        # used when WARP is disabled.
+        if challenge_detected or last_status == 403:
             try:
                 if last_status == 403:
                     self._invalidate_cached_solver_state(url)
@@ -531,6 +537,11 @@ class VixSrcExtractor:
                     # Prevent a stale proxy from a previous request from being
                     # reused when this request explicitly selected direct.
                     self.session_proxy = None
+                logger.info(
+                    "VixSrc 403/challenge fallback: starting FlareSolverr for %s via %s",
+                    url,
+                    solver_proxy or "direct",
+                )
                 return await self._flaresolverr_response(
                     url,
                     headers=final_headers,

@@ -12,6 +12,8 @@ import hashlib
 import socket
 import config as _config
 import config_store
+from services.session_lifetime import retire_session
+from services.socks_bridge import close_socks_bridges
 
 import services.proxy_shared as _shared
 from services.proxy_shared import (
@@ -114,20 +116,39 @@ class HLSProxyCoreMixin:
                         p_sess = self._proxy_sessions.pop(p, None)
                         self._proxy_session_atimes.pop(p, None)
                         if p_sess and not p_sess.closed:
-                            await p_sess.close()
+                            retire_session(self, p_sess)
                             logger.info(f"[NET] Closed idle proxy session: {p}")
 
                 # 3. Close shared session if idle >30s
                 _session_atime = getattr(self, "_session_atime", 0)
                 if _session_atime and now - _session_atime > 30:
                     if self.session and not self.session.closed:
-                        await self.session.close()
+                        retire_session(self, self.session)
                         logger.info("[NET] Closed idle shared session (idle %.0fs)", now - _session_atime)
                     self.session = None
                     if self.flex_session and not self.flex_session.closed:
-                        await self.flex_session.close()
+                        retire_session(self, self.flex_session)
                         logger.info("[NET] Closed idle flex session (idle %.0fs)", now - _session_atime)
                     self.flex_session = None
+
+                # 3b. Close retired extractors older than 60s
+                if hasattr(self, "_retired_extractors") and self._retired_extractors:
+                    atimes = getattr(self, "_retired_extractor_atimes", None)
+                    if atimes is None:
+                        atimes = self._retired_extractor_atimes = {}
+                    still_retired = []
+                    for ext in self._retired_extractors:
+                        t = atimes.setdefault(id(ext), now)
+                        if now - t > 60:
+                            if hasattr(ext, "close"):
+                                try:
+                                    await ext.close()
+                                except Exception:
+                                    pass
+                            atimes.pop(id(ext), None)
+                        else:
+                            still_retired.append(ext)
+                    self._retired_extractors = still_retired
 
                 # 4. Compact Windows heap to release freed pages
                 await self._compact_heap()
@@ -674,7 +695,7 @@ class HLSProxyCoreMixin:
                 p_sess = self._proxy_sessions.pop(p_url, None)
                 self._proxy_session_atimes.pop(p_url, None)
                 if p_sess and not p_sess.closed:
-                    await p_sess.close()
+                    retire_session(self, p_sess)
 
         proxy = forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp)
         if not proxy and not _config.is_direct_connection_allowed(bypass_warp):
@@ -703,7 +724,7 @@ class HLSProxyCoreMixin:
                         oldest_sess = self._proxy_sessions.pop(oldest_proxy, None)
                         self._proxy_session_atimes.pop(oldest_proxy, None)
                         if oldest_sess and not oldest_sess.closed:
-                            await oldest_sess.close()
+                            retire_session(self, oldest_sess)
                             logger.info(f"[NET] Evicted oldest proxy session: {oldest_proxy}")
                 except Exception as e:
                     logger.warning(f"Failed to evict proxy session: {e}")
@@ -737,7 +758,7 @@ class HLSProxyCoreMixin:
             return SharedSessionWrapper(session), proxy
 
         session = await self._get_session(prefer_default_family=prefer_default_family)
-        return session, None
+        return SharedSessionWrapper(session), None
 
     async def _invalidate_proxy_session(self, proxy_url: str | None) -> bool:
         """Drop one pooled proxy session so the next request gets a new connector."""
@@ -749,7 +770,7 @@ class HLSProxyCoreMixin:
         if not session:
             return False
         if not session.closed:
-            await session.close()
+            retire_session(self, session)
         logger.warning("[NET] Invalidated pooled proxy session: %s", proxy_url)
         return True
 
@@ -839,7 +860,25 @@ class HLSProxyCoreMixin:
         for key, cached_extractor in self.extractors.items():
             if cached_extractor is extractor:
                 return key
+        if extractor is not None:
+            name = getattr(extractor, "extractor_name", None)
+            if name:
+                return name
         return None
+
+    def _invalidate_extractors(self):
+        """Retire active extractors so in-flight requests can finish, while
+        new requests get fresh instances with updated routing/proxies."""
+        retired = getattr(self, "_retired_extractors", None)
+        if retired is None:
+            retired = self._retired_extractors = []
+        for extractor in list(self.extractors.values()):
+            retired.append(extractor)
+        self.extractors.clear()
+        if hasattr(self, "_extractor_atimes"):
+            self._extractor_atimes.clear()
+        if hasattr(self, "_extractor_stream_atimes"):
+            self._extractor_stream_atimes.clear()
 
     @staticmethod
     def _stream_key_for_url(url: str | None) -> str | None:
@@ -849,11 +888,17 @@ class HLSProxyCoreMixin:
 
     def _touch_extractor_activity(self, extractor_key: str | None = None, stream_key: str | None = None):
         now = time.time()
-        if extractor_key and extractor_key in self.extractors:
-            self._extractor_atimes[extractor_key] = now
-            if stream_key:
-                self._extractor_stream_atimes[(extractor_key, stream_key)] = now
-            return
+        if extractor_key:
+            normalized = extractor_key.replace("_direct", "").replace("_noproxy", "")
+            matched = False
+            for k in list(self.extractors.keys()):
+                if k == extractor_key or k.startswith(normalized):
+                    self._extractor_atimes[k] = now
+                    if stream_key:
+                        self._extractor_stream_atimes[(k, stream_key)] = now
+                    matched = True
+            if matched:
+                return
         for key in self.extractors:
             self._extractor_atimes[key] = now
             if stream_key:
@@ -911,6 +956,11 @@ class HLSProxyCoreMixin:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
+        retired = list(getattr(self, "_retired_session_tasks", ()))
+        for task in retired:
+            task.cancel()
+        if retired:
+            await asyncio.gather(*retired, return_exceptions=True)
 
         try:
             if self.session and not self.session.closed:
@@ -926,11 +976,24 @@ class HLSProxyCoreMixin:
                 if hasattr(self, "_proxy_session_atimes"):
                     self._proxy_session_atimes.clear()
 
-            for extractor in self.extractors.values():
+            for extractor in list(self.extractors.values()):
                 if hasattr(extractor, "close"):
                     await extractor.close()
             self.extractors.clear()
-            self._extractor_atimes.clear()
-            self._extractor_stream_atimes.clear()
+            if hasattr(self, "_extractor_atimes"):
+                self._extractor_atimes.clear()
+            if hasattr(self, "_extractor_stream_atimes"):
+                self._extractor_stream_atimes.clear()
+
+            retired = list(getattr(self, "_retired_extractors", ()))
+            for extractor in retired:
+                if hasattr(extractor, "close"):
+                    await extractor.close()
+            if hasattr(self, "_retired_extractors"):
+                self._retired_extractors.clear()
+            if hasattr(self, "_retired_extractor_atimes"):
+                self._retired_extractor_atimes.clear()
+
+            await close_socks_bridges()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
